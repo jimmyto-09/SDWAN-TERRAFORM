@@ -46,8 +46,8 @@ resource "kubernetes_pod" "vnf_access" {
       sleep 2
     done
 
-    SELF_IP=$(hostname -i)
-    echo "🌐 IP local (access): $SELF_IP"
+    ACCESS_IP=$(hostname -i)
+    echo "🌐 IP local (access): $ACCESS_IP"
     echo "🎯 IP remota (cpe): $CPE_IP"
 
     ip link del vxlan2 2>/dev/null || true 
@@ -91,22 +91,60 @@ resource "kubernetes_pod" "vnf_access" {
     ip link set vxlan1 up
     ip link set axswan up
     
+    
+    #########################################
+   #######  Conectar ambos bridges a Ryu ###
+   #########################################
+
+   while true; do
+  RYU_IP=$(getent hosts knf-ctrl-${each.key}-svc | awk '{print $1}')
+  if [ -n "$RYU_IP" ]; then
+    echo "🔗 Ryu controller IP: $RYU_IP"
+    break
+  fi
+  echo "⏳ Esperando IP de controller…"
+  sleep 2
+done
+
+   ## 3. Activar el modo SDN en VNF:access"
+        ovs-vsctl set bridge brwan protocols=OpenFlow10,OpenFlow12,OpenFlow13
+        ovs-vsctl set-fail-mode brwan secure
+        ovs-vsctl set bridge brwan other-config:datapath-id=0000000000000003
+        ovs-vsctl set-controller brwan tcp:$RYU_IP:6633
+        ovs-vsctl set-manager ptcp:6632
 
     sleep infinity
   EOT
 ]
+      ### (c) Permisos adicionales
+     security_context {
+      privileged = true
+      capabilities { add = ["NET_ADMIN", "SYS_ADMIN"] }
+    }
+  }
 
+  # Contenedor Sidecar para Node Exporter
+  container {
+    name  = "node-exporter"
+    image = "quay.io/prometheus/node-exporter:latest"
 
-      security_context {
-        privileged = true
-        capabilities {
-          add = ["NET_ADMIN", "SYS_ADMIN"]
-        }
+    port {
+      container_port = 9100
+    }
+
+    resources {
+      limits = {
+        cpu    = "100m"
+        memory = "128Mi"
+      }
+      requests = {
+        cpu    = "50m"
+        memory = "64Mi"
       }
     }
   }
+  }
 }
-
 resource "kubernetes_service" "vnf_access" {
   for_each = local.vnf_access_instances
 

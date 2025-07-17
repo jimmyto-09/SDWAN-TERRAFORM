@@ -22,12 +22,6 @@ resource "kubernetes_pod" "vnf_wan" {
       name  = "vnf-wan"
       image = "educaredes/vnf-wan"
 
-      volume_mount {
-        name       = "json-flows"
-        mount_path = "/json"
-        read_only  = true
-      }
-
       command = [
         "/bin/sh",
         "-c",
@@ -46,8 +40,8 @@ resource "kubernetes_pod" "vnf_wan" {
             sleep 2
           done
 
-          SELF_IP=$(hostname -i)
-          echo "🌐 IP local (wan): $SELF_IP"
+          WAN_IP=$(hostname -i)
+          echo "🌐 IP local (wan): $WAN_IP"
           echo "🎯 IP remota (access): $ACCESS_IP"
 
           ip link del axswan 2>/dev/null || true
@@ -78,95 +72,65 @@ resource "kubernetes_pod" "vnf_wan" {
           ovs-vsctl add-port brwan cpewan
           ifconfig cpewan up
 
-          #####################
-          ####### RYU ########
-          #####################
+          
+    #########################################
+   #######  Conectar ambos bridges a Ryu ###
+   #########################################
 
-          ryu-manager /root/flowmanager/flowmanager.py ryu.app.ofctl_rest > /ryu.log 2>&1 &
-
-          ovs-vsctl set bridge brwan protocols=OpenFlow10,OpenFlow12,OpenFlow13
-          ovs-vsctl set-fail-mode brwan secure
-          ovs-vsctl set bridge brwan other-config:datapath-id=0000000000000001
-          ovs-vsctl set-controller brwan tcp:127.0.0.1:6633
-
-         until curl -s http://127.0.0.1:8080/stats/switches | grep -q "\[1\]"; do
-  sleep 1
+   while true; do
+  RYU_IP=$(getent hosts knf-ctrl-${each.key}-svc | awk '{print $1}')
+  if [ -n "$RYU_IP" ]; then
+    echo "🔗 Ryu controller IP: $RYU_IP"
+    break
+  fi
+  echo "⏳ Esperando IP de controller…"
+  sleep 2
 done
-
-
-echo "📡 Datapath activo. Esperando estabilización..."
-sleep 2  # 💤 Espera adicional para evitar errores de tiempo
-
-echo "📥 Cargando reglas SDN en Ryu..."
-RYU_ADD_URL="http://127.0.0.1:8080/stats/flowentry/add"
-curl -X POST -d @/json/from-cpe.json $RYU_ADD_URL || echo "❌ from-cpe.json failed"
-curl -X POST -d @/json/to-cpe.json $RYU_ADD_URL || echo "❌ to-cpe.json failed"
-curl -X POST -d @/json/broadcast-from-axs.json $RYU_ADD_URL || echo "❌ broadcast failed"
-curl -X POST -d @/json/from-mpls.json $RYU_ADD_URL || echo "❌ from-mpls failed"
-curl -X POST -d @/json/to-voip-gw.json $RYU_ADD_URL || echo "❌ to-voip-gw failed"
-curl -X POST -d @/json/sdedge${each.value.netnum}/to-voip.json $RYU_ADD_URL || echo "❌ to-voip failed"
-
-
-echo "--"
-echo "sdedge${each.value.netnum}: abrir navegador en el host para ver los flujos OpenFlow:"
-echo "firefox http://localhost:${each.value.netnum == 1 ? 31880 : 31881}/home/ &"
-
-
+   
+   ## 3. Activar el modo SDN en VNF:wan"
+        ovs-vsctl set bridge brwan protocols=OpenFlow10,OpenFlow12,OpenFlow13
+        ovs-vsctl set-fail-mode brwan secure
+        ovs-vsctl set bridge brwan other-config:datapath-id=0000000000000001
+        ovs-vsctl set-controller brwan tcp:$RYU_IP:6633
+        ovs-vsctl set-manager ptcp:6632
 
           sleep infinity
         EOT
-      ]
+]
 
-      security_context {
-        privileged = true
-        capabilities {
-          add = ["NET_ADMIN", "SYS_ADMIN"]
-        }
-      }
+      ### (c) Permisos adicionales
+       security_context {
+      privileged = true
+      capabilities { add = ["NET_ADMIN", "SYS_ADMIN"] }
+    }
+  }
+
+  # Segundo contenedor: metrics exporter
+  container {
+    name  = "metrics"
+    image = "prom/statsd-exporter"
+    args  = ["--web.listen-address=:9100"]
+
+    port {
+      container_port = 9100
+      name           = "metrics"
     }
 
-    volume {
-      name = "json-flows"
-      host_path {
-        path = "/home/upm/shared/sdedge-ns/json"
-        type = "Directory"
+    resources {
+      limits = {
+        cpu    = "100m"
+        memory = "64Mi"
+      }
+      requests = {
+        cpu    = "50m"
+        memory = "32Mi"
       }
     }
   }
 }
-
-
-resource "kubernetes_service" "vnf_wan" {
-  for_each = local.vnf_wan_instances
-
-  metadata {
-    name      = "vnf-wan-${each.key}-service"
-    namespace = "rdsv"
-  }
-
-  spec {
-    type = "NodePort"
-    selector = {
-      "k8s-app" = "vnf-wan-${each.key}"
-    }
-
-    port {
-      name        = "ryu"
-      protocol    = "TCP"
-      port        = 6633
-      target_port = 6633
-      node_port   = each.key == "site1" ? 31633 : 31634
-    }
-# 👇 Añade este bloque para exponer la API REST de Ryu
-    port {
-      name        = "ryu-rest"
-      protocol    = "TCP"
-      port        = 8080
-      target_port = 8080
-      node_port   = each.key == "site1" ? 31880 : 31881
-    }
-  }
 }
+
+    
 
 #########################################################################
 #  Servicio headless → devuelve la IP real del Pod WAN
@@ -180,15 +144,14 @@ resource "kubernetes_service" "vnf_wan_pod" {
   }
 
   spec {
-    cluster_ip = "None"                     # headless
+    cluster_ip = "None"                  
     selector   = { "k8s-app" = "vnf-wan-${each.key}" }
 
-    # Puerto ficticio para crear Endpoints; VXLAN es UDP
     port {
-      name        = "vxlan"
-      protocol    = "UDP"
-      port        = 4788
-      target_port = 4788
+      name        = "bgp"
+      protocol    = "TCP"
+      port        = 179
+      target_port = 179
     }
   }
 }

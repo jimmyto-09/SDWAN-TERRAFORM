@@ -1,0 +1,17 @@
+resource "kubernetes_config_map" "sdn_rules" {
+  for_each = var.vnf_sites
+
+  metadata {
+    name      = "sdn-rules-${each.key}"
+    namespace = "rdsv"
+  }
+
+  data = {
+  "from-cpe.json"           = file("/home/upm/shared/sdedge-ns/json/from-cpe.json")
+  "to-cpe.json"             = file("/home/upm/shared/sdedge-ns/json/to-cpe.json")
+  "broadcast-from-axs.json" = file("/home/upm/shared/sdedge-ns/json/broadcast-from-axs.json")
+  "from-mpls.json"          = file("/home/upm/shared/sdedge-ns/json/from-mpls.json")
+  "to-voip-gw.json"         = file("/home/upm/shared/sdedge-ns/json/to-voip-gw.json")
+  "to-voip.json"            = file(format("/home/upm/shared/sdedge-ns/json/sdedge%d/to-voip.json", each.value.netnum))
+}
+}

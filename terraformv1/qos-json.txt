@@ -1,0 +1,12 @@
+resource "kubernetes_config_map" "qos_json" {
+  metadata {
+    name      = "qos-json"
+    namespace = "rdsv"
+  }
+
+  # Ajusta la ruta local si tu repo difiere
+  data = {
+    "rule-to-voip.json"  = file("${path.module}/../sdedge-ns/json/qos/rule-to-voip.json")
+    "queue-to-voip.json" = file("${path.module}/../sdedge-ns/json/qos/queue-to-voip.json")
+  }
+}

@@ -57,6 +57,18 @@ resource "kubernetes_pod" "vnf_cpe" {
           done
           echo "🎯 WAN_IP=$WAN_IP"
 
+           while true; do
+  RYU_IP=$(getent hosts knf-ctrl-${each.key}-svc | awk '{print $1}')
+  if [ -n "$RYU_IP" ]; then
+    echo "🔗 Ryu controller IP: $RYU_IP"
+    break
+  fi
+  echo "⏳ Esperando IP de controller…"
+  sleep 2
+done
+
+          
+
           ################################ BRINT  (access ↔ cpe)
           # 1. Crear bridge OVS dentro del contenedor CPE
           ovs-vsctl add-br brint
@@ -77,6 +89,8 @@ resource "kubernetes_pod" "vnf_cpe" {
 
           # 6. Rutas para poder alcanzar primero al Pod Access
           ip route add $ACCESS_IP/32 via 169.254.1.1
+          ip route add $RYU_IP/32 via 169.254.1.1 dev eth0
+
 
           # 7. Ahora modificamos la ruta por defecto (DNS ya no es necesario)
           ip route del 0.0.0.0/0 via 169.254.1.1
@@ -93,7 +107,18 @@ resource "kubernetes_pod" "vnf_cpe" {
           ip route add $WAN_IP/32 via 169.254.1.1
           ovs-vsctl add-br brwan
           ifconfig brwan mtu 1400          
-          ifconfig brwan up                
+          ifconfig brwan up     
+
+           ## 3. Activar el modo SDN en VNF:wan"
+        ovs-vsctl set bridge brwan protocols=OpenFlow10,OpenFlow12,OpenFlow13
+        ovs-vsctl set-fail-mode brwan secure
+        ovs-vsctl set bridge brwan other-config:datapath-id=0000000000000002
+        ovs-vsctl set-controller brwan tcp:$RYU_IP:6633
+        ovs-vsctl set-manager ptcp:6632
+
+          #######  Conectar ambos bridges a Ryu ###
+   ######################################
+
           ip link add cpewan type vxlan id 5 remote $WAN_IP dstport 8741 dev eth0
           ovs-vsctl add-port brwan cpewan
           ifconfig cpewan up
@@ -102,6 +127,9 @@ resource "kubernetes_pod" "vnf_cpe" {
           ip link add sr1sr2 type vxlan id 12 remote ${each.value.remotesite} dstport 8742 dev net${each.value.netnum}
           ovs-vsctl add-port brwan sr1sr2
           ifconfig sr1sr2 up
+
+          #########################################
+   
 
           sleep infinity
         EOT
